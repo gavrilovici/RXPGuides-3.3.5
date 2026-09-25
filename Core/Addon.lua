@@ -192,7 +192,11 @@ function addon.Call(label,func,...)
     --if true then return true end
     label = label or ""
     addon.lastCall = label
+    -- PerfBegin returns nil unless a /rxp perf capture is running, so the
+    -- per-directive breakdown costs nothing in normal play.
+    local perf = addon.PerfBegin and addon.PerfBegin()
     local pass, r1, r2, r3, r4 = pcall(func,...)
+    if perf then addon.PerfEnd("directive: " .. tostring(label), perf) end
     if not pass then
         local msg = r1
         addon.errors[label] = addon.errors[label] or {}
@@ -2881,9 +2885,12 @@ function addon.LegacyUpdateLoop()
         if addon.updateSteps then
             event = event .. "/stepComplete"
 
+            local perf = addon.PerfBegin and addon.PerfBegin("step completion")
             addon.UpdateStepCompletion()
+            if addon.PerfEnd then addon.PerfEnd("step completion", perf) end
         elseif addon.updateStepText and addon.currentGuide and skip % 2 == 0 then
             event = event .. "/textsingle"
+            local perf = addon.PerfBegin and addon.PerfBegin("step text")
 
             addon.updateStepText = false
             local updateText
@@ -2894,6 +2901,7 @@ function addon.LegacyUpdateLoop()
                 tinsert(update,n)
             end
 
+            local rowsPerf = addon.PerfBegin and addon.PerfBegin("step text: rows")
             for _,n in pairs(update) do
                 if steps[n] then
                     if not updateText and steps[n].active then
@@ -2903,27 +2911,45 @@ function addon.LegacyUpdateLoop()
                     if not addon.updateStepText then
                         addon.stepUpdateList[n] = nil
                     end
+                else
+                    -- Left over from a previously loaded guide.
+                    addon.stepUpdateList[n] = nil
                 end
             end
+            if addon.PerfEnd then addon.PerfEnd("step text: rows", rowsPerf) end
 
             if updateText or addon.updateTipWindow then
                 addon.updateTipWindow = false
+                local cardPerf = addon.PerfBegin and
+                                     addon.PerfBegin("step text: current card")
                 addon.RXPFrame.CurrentStepFrame.UpdateText()
+                if addon.PerfEnd then
+                    addon.PerfEnd("step text: current card", cardPerf)
+                end
             end
+            if addon.PerfEnd then addon.PerfEnd("step text", perf) end
         elseif addon.updateBottomFrame then
             event = event .. "/bottomFrame"
 
             errorCount = 0
+            local perf = addon.PerfBegin and addon.PerfBegin("guide list redraw")
             addon.RXPFrame.BottomFrame.UpdateFrame()
             addon.RXPFrame.SetStepFrameAnchor()
+            if addon.PerfEnd then addon.PerfEnd("guide list redraw", perf) end
             updateError = false
             skip = 1
 
             return 'bottomFrame'
         elseif skip % 2 == 1 and next(addon.guideCache) then
             event = event .. "/cache"
+            local perf = addon.PerfBegin and addon.PerfBegin("guide caching")
             local length = 0
             local loadGuide = true
+            -- Background parsing competes with the frame. Upstream's 45k-char
+            -- budget still parses several guides per tick (40+ ms hitches on
+            -- 3.3.5), so also stop once this tick has spent its time budget.
+            local clock = _G.debugprofilestop
+            local started = clock and clock()
 
             for _,guide in pairs(addon.guides) do
                 if (loadGuide or guide.disablecaching) and not guide.steps then
@@ -2931,11 +2957,13 @@ function addon.LegacyUpdateLoop()
                     guideLoaded = true
                     length = length + (tonumber(guide.length) or 0)
                     --print('f',not guide.steps and guide.name)
-                    if length > 45000 or GetFramerate() < 60 then
+                    if length > 45000 or GetFramerate() < 60 or
+                        (started and clock() - started > 4) then
                         loadGuide = false
                     end
                 end
             end
+            if addon.PerfEnd then addon.PerfEnd("guide caching", perf) end
 
             if not next(addon.guideCache) and RXPCData.guideMetaData.enabledDungeons then
                 RXPCData.guideMetaData.enabledDungeons[addon.player.faction] =
@@ -2947,6 +2975,7 @@ function addon.LegacyUpdateLoop()
 
     if not guideLoaded and addon.currentGuide then
         event = event .. "/istep"
+        local perf = addon.PerfBegin and addon.PerfBegin("step rows refresh")
         local max = #addon.currentGuide.steps
         local offset = RXPCData.currentStep + 1
         if stepCounter == offset then
@@ -2974,6 +3003,7 @@ function addon.LegacyUpdateLoop()
             updateTimer = time
             skip = skip % 4096
         end
+        if addon.PerfEnd then addon.PerfEnd("step rows refresh", perf) end
 
     end
 

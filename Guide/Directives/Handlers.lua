@@ -842,35 +842,69 @@ function addon.GetQuestObjectives(id, step, useCache)
     end
 end
 
+-- NPC names are resolved through a private scanning tooltip. Upstream drove the
+-- shared GameTooltip with a retail GUID ("unit:Creature-0-0-0-0-id"), which
+-- 3.3.5 never resolves: every step-text refresh re-ran the lookup, fired every
+-- other addon's GameTooltip hooks and closed the player's open tooltip.
+-- Guide text already carries the English name, so English clients skip the
+-- lookup; other locales use the 3.3.5 creature GUID layout (0xF130, 24-bit
+-- entry, 24-bit counter) with a bounded backoff.
 local NPCNames = {}
-function addon.GetNpcName(id)
-    local npc = NPCNames[id]
+local npcRetry = {}
+local NPC_RETRY_DELAYS = {1.5, 5, 15, 60}
+local npcScanTooltip
+local englishNpcNames = GetLocale and
+                            (GetLocale() == "enUS" or GetLocale() == "enGB")
 
-    if type(id) ~= "number" then
-        return
-    elseif type(npc) == "string" then
-        return npc
-    elseif not npc or GetTime()-npc > 1.5  then
-        GameTooltip:SetOwner(WorldFrame, "ANCHOR_BOTTOMRIGHT")
-        GameTooltip:ClearLines()
-        GameTooltip:SetHyperlink(string.format("unit:Creature-0-0-0-0-%d",id))
-        local name
-        if GameTooltip:IsShown() then
-            name = GameTooltipTextLeft1:GetText()
-            --DevTools_Dump(name)
-            name = name:match("^|c%x%x%x%x%x%x%x%x(.*)|") or name
-            NPCNames[id] = name
-        end
-        GameTooltip:Hide()
-        if name then
-            return name
-        else
-            NPCNames[id] = GetTime()
-            return
-        end
-    else
-        return
+local function ScanNpcName(id)
+    if not npcScanTooltip then
+        npcScanTooltip = CreateFrame("GameTooltip", "RXP335NpcScanTooltip",
+                                     nil, "GameTooltipTemplate")
     end
+    local tip = npcScanTooltip
+    tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+    tip:ClearLines()
+    local ok = pcall(tip.SetHyperlink, tip,
+                     string.format("unit:0xF130%06X000000", id))
+    local name
+    if ok and tip:NumLines() > 0 then
+        local line = _G["RXP335NpcScanTooltipTextLeft1"]
+        name = line and line:GetText()
+        if name then
+            name = name:match("^|c%x%x%x%x%x%x%x%x(.*)|") or name
+            if name == "" then name = nil end
+        end
+    end
+    tip:Hide()
+    return name
+end
+
+function addon.GetNpcName(id)
+    if type(id) ~= "number" then return end
+    local npc = NPCNames[id]
+    if npc then return npc end
+    if englishNpcNames then return end
+
+    local retry = npcRetry[id]
+    local now = GetTime()
+    if retry and (retry.gaveUp or now < retry.nextTry) then return end
+
+    local name = ScanNpcName(id)
+    if name then
+        NPCNames[id] = name
+        npcRetry[id] = nil
+        return name
+    end
+
+    retry = retry or {attempts = 0}
+    retry.attempts = retry.attempts + 1
+    local delay = NPC_RETRY_DELAYS[retry.attempts]
+    if delay then
+        retry.nextTry = now + delay
+    else
+        retry.gaveUp = true
+    end
+    npcRetry[id] = retry
 end
 
 function addon.ReplaceNpcIds(textLine,element)
@@ -985,6 +1019,14 @@ function addon.UpdateStepText(self)
         index = self
     else
         index = self.step.index
+    end
+    -- The guide window is re-running this row's directives ("WindowUpdate")
+    -- and renders the row right afterwards. Re-queueing it here made every
+    -- .complete/.accept row near the current step refresh itself forever.
+    -- An active step's card still picks the change up on the next text pass.
+    if index and index == addon.windowUpdateRow then
+        if self.step.active then addon.updateTipWindow = true end
+        return
     end
     addon.updateStepText = true
     if index then
