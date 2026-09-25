@@ -282,13 +282,17 @@ RXPFrame.SetStepFrameAnchor = SetStepFrameAnchor
 
 local isResizing
 
+-- Do no layout work while dragging. The step rows are chained by anchors, so
+-- re-heighting them forces a full layout cascade; doing that (or re-rendering
+-- every step's text, as upstream did) per frame stalls the client. Rows keep
+-- their width anchors and re-wrap on their own; heights are fixed once on
+-- release.
 RXPFrame.OnMouseDown = function(self, button, resize)
     if addon.settings.profile.lockFrames then return end
 
     if resize or IsAltKeyDown() and
         not (addon.currentGuide and addon.currentGuide.hidewindow) then
         RXPFrame:StartSizing("BOTTOMRIGHT")
-        RXPFrame:SetScript("OnUpdate", RXPFrame.BottomFrame.UpdateFrame)
         isResizing = true
     else
         RXPFrame:StartMoving()
@@ -299,8 +303,10 @@ RXPFrame.OnMouseUp = function(self, button)
     RXPFrame:StopMovingOrSizing()
     if isResizing then
         addon.settings.profile.frameHeight = RXPFrame:GetHeight()
+        -- Re-measure wrapped heights for the new width without re-rendering
+        -- text, then let SetStep refresh the current step card.
+        RXPFrame.BottomFrame.RelayoutWidth()
         addon.SetStep(RXPCData.currentStep)
-        RXPFrame:SetScript("OnUpdate", nil)
     end
     SetStepFrameAnchor()
     addon.UpdateItemFrame()
@@ -2818,6 +2824,15 @@ function addon.RefreshGuideLanguage()
     end
 end
 
+-- Re-run a directive so its row text is current. The row is rendered right
+-- after, so addon.UpdateStepText ignores re-queue requests for it meanwhile.
+local function WindowUpdateElement(element)
+    local previous = addon.windowUpdateRow
+    addon.windowUpdateRow = element.step and element.step.index
+    addon.Call(element.tag, addon.functions[element.tag], element, "WindowUpdate")
+    addon.windowUpdateRow = previous
+end
+
 function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
     local level = UnitLevel("player")
 
@@ -2847,7 +2862,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
 
             if not languageRefresh and element.requestFromServer then
                 --addon.lastCall = element.tag
-                addon.Call(element.tag,addon.functions[element.tag],element,"WindowUpdate")
+                WindowUpdateElement(element)
                 addon.updateStepText =
                     addon.updateStepText or
                         not element.requestFromServer
@@ -2857,7 +2872,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
                 (stepDiff <= 8 and stepDiff >= 0 or element.keepUpdating) then
                 --addon.lastCall = element.tag
                 --addon.functions[element.tag](element,"WindowUpdate")
-                addon.Call(element.tag,addon.functions[element.tag],element,"WindowUpdate")
+                WindowUpdateElement(element)
             end
 
             rawtext = element.tooltipText
@@ -2872,6 +2887,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
             end
 
             if rawtext and not element.hideTooltip then
+                local renderPerf = addon.PerfBegin and addon.PerfBegin()
                 local rendered, meta = addon.guideLocalization:Render(
                     rawtext, element, element.tooltipText and
                         "tooltipText" or "text")
@@ -2880,6 +2896,9 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
                 translationMachine = translationMachine or
                                          (meta and meta.machine) or false
                 rawtext = addon.ReplaceNpcIds(rendered, element)
+                if renderPerf then
+                    addon.PerfEnd("row: text formatting", renderPerf)
+                end
                 if not text then
                     text = "   " .. rawtext
                 else
@@ -2895,6 +2914,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
             step.text = text
         end
 
+        local layoutPerf = addon.PerfBegin and addon.PerfBegin()
         if frame.text then
             frame.text:SetText(text)
         end
@@ -2918,6 +2938,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
         end
 
         stepPos[0] = stepPos[0] + hDiff
+        if layoutPerf then addon.PerfEnd("row: layout", layoutPerf) end
 
     else
         addon.updateBottomFrame = false
@@ -2943,7 +2964,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
                     if element.requestFromServer then
                         --addon.lastCall = element.tag
                         --addon.functions[element.tag](element,"WindowUpdate")
-                        addon.Call(element.tag,addon.functions[element.tag],element,"WindowUpdate")
+                        WindowUpdateElement(element)
                         addon.updateStepText =
                             addon.updateStepText or
                                 not element.requestFromServer
@@ -2954,7 +2975,7 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
 
                         --addon.lastCall = element.tag
                         --addon.functions[element.tag](element,"WindowUpdate")
-                        addon.Call(element.tag,addon.functions[element.tag],element,"WindowUpdate")
+                        WindowUpdateElement(element)
                     end
                 end
 
@@ -3062,6 +3083,36 @@ function BottomFrame.UpdateFrame(self, stepn, languageRefresh)
 
     addon.BetaVersionCheck()
 
+end
+
+-- Cheap layout pass after a resize: keeps each row's current text and only
+-- re-measures wrapped heights for the new width. Mirrors the height rules of
+-- UpdateFrame's full pass so stepPos stays consistent with it.
+function BottomFrame.RelayoutWidth()
+    if not (addon.currentGuide and stepPos[0] and ScrollChild.f1) then return end
+    ScrollChild:SetWidth(RXPFrame:GetWidth() - 35)
+
+    local level = UnitLevel("player")
+    local totalHeight = 0
+    for n, frame in ipairs(ScrollChild.framePool) do
+        if not frame:IsShown() then break end
+        local step = frame.step
+        if not (step and frame.text) then break end
+        local fheight
+        if step.level > level or not IsFrameShown(frame, step) then
+            fheight = IsFrameShown(frame, step) and 1 or -3
+            frame:SetHeight(1)
+        else
+            fheight = math.ceil(frame.text:GetStringHeight() + 8)
+            frame:SetHeight(fheight)
+        end
+        totalHeight = totalHeight + fheight + 2
+        stepPos[n] = totalHeight - 5
+    end
+    stepPos[0] = totalHeight
+
+    ScrollChild:SetHeight(ScrollChild.f1:GetHeight() -
+                              (BottomFrame.hiddenFrames or 0) * 4)
 end
 -- addon.hiddenFrames = 0
 --[[BottomFrame.stepList = {}
