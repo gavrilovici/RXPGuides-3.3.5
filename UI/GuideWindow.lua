@@ -1425,7 +1425,16 @@ function CurrentStepFrame.UpdateText(languageRefresh)
                         elementFrame.text:ClearAllPoints()
                         elementFrame.text:SetPoint("TOPLEFT", elementFrame.button,
                                                 "TOPRIGHT", 11, -1)
-                        elementFrame.text:SetPoint("RIGHT", stepframe, -5, 0)
+                        -- A RIGHT anchor would also pin the vertical center and
+                        -- clamp the height (truncating with "..."); give the
+                        -- text only a width so it wraps and the card grows.
+                        local stepWidth = stepframe:GetWidth()
+                        if not stepWidth or stepWidth <= 0 then
+                            stepWidth = step.tip and 200 or
+                                            CurrentStepFrame:GetWidth()
+                        end
+                        -- button inset (6) + button (12) + gap (11) + right pad (5)
+                        elementFrame.text:SetWidth(math.max(stepWidth - 34, 1))
 
                          -- Prevent text from overwritten with " ", could be stale text
                         if element.text ~= ' ' then
